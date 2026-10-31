@@ -19,6 +19,7 @@ OUTCOME_CODES = {
 ONE_HOT_COLUMNS = ["gender", "region", "hemorrhage_type"]
 LIST_PREFIXES = {"risk_factors": "risk", "symptoms": "symptom"}
 ID_COLUMN = "patient_id"
+DATE_COLUMN = "date"
 TARGET_COLUMN = "outcome"
 
 
@@ -28,12 +29,13 @@ def process_data(clean):
     - risk_factors / symptoms -> one 0/1 column per item (risk_smoking, ...)
     - gender / region / hemorrhage_type -> one 0/1 column per category
     - outcome -> 0 (Recovered) to 3 (Fatal), see OUTCOME_CODES
-    - date is dropped because year already covers it
+    - patient_id and date are kept as-is for reference, but aren't model
+      inputs (see split_features_target)
 
     Age is left unscaled on purpose: fit any scaler on the training split
     only, so the test set doesn't leak into it.
     """
-    df = clean.drop(columns=["date"])
+    df = clean
     for column in LIST_COLUMNS:
         df = encode_list_column(df, column, LIST_PREFIXES[column])
     df = pd.get_dummies(df, columns=ONE_HOT_COLUMNS, dtype=int)
@@ -72,8 +74,12 @@ def encode_outcome(df):
 
 
 def split_features_target(processed):
-    """Return (X, y) for training: every feature column, and the outcome codes."""
-    X = processed.drop(columns=[ID_COLUMN, TARGET_COLUMN])
+    """Return (X, y) for training: every feature column, and the outcome codes.
+
+    The ID and date are left out of X. The ID has no medical meaning, and
+    the date is text that repeats the year column.
+    """
+    X = processed.drop(columns=[ID_COLUMN, DATE_COLUMN, TARGET_COLUMN])
     y = processed[TARGET_COLUMN]
     return X, y
 

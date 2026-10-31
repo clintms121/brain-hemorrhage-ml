@@ -1,7 +1,8 @@
-"""Clean the raw dataset into consistent, correctly typed columns.
+"""Prepare the raw dataset: rename the columns, check its quality, and split the list columns.
 
-Each step takes a DataFrame and returns a new one, so steps can be run
-one at a time while exploring, or all together with clean_data().
+The raw data has no missing values, duplicates, stray spaces, or impossible
+values, so nothing is filled in, trimmed, or removed. check_quality() proves
+that on every run, and stops the pipeline if a new version of the data breaks it.
 """
 
 import pandas as pd
@@ -18,34 +19,17 @@ COLUMN_NAMES = {
     "Symptoms": "symptoms",
     "Outcome": "outcome",
 }
-CATEGORY_COLUMNS = ["gender", "region", "hemorrhage_type", "outcome"]
 # Columns holding several comma-separated values, e.g. "Hypertension, Smoking".
 LIST_COLUMNS = ["risk_factors", "symptoms"]
-TEXT_COLUMNS = ["patient_id"] + CATEGORY_COLUMNS + LIST_COLUMNS
-# A missing date is fine as long as year is present, and a missing
-# risk_factors value is filled with "None/Unknown" instead of being dropped.
-REQUIRED_COLUMNS = ["patient_id", "age", "year"] + CATEGORY_COLUMNS + ["symptoms"]
-UNKNOWN_RISK = "None/Unknown"
+TEXT_COLUMNS = ["patient_id", "gender", "region", "hemorrhage_type", "risk_factors", "symptoms", "outcome"]
 MIN_AGE, MAX_AGE = 0, 120
 
 
 def clean_data(raw, verbose=True):
-    """Run every cleaning step in order and return the cleaned DataFrame."""
-    df = raw
-    steps = [
-        rename_columns,
-        strip_text,
-        remove_duplicates,
-        fix_types,
-        remove_invalid_rows,
-        split_list_columns,
-    ]
-    for step in steps:
-        rows_before = len(df)
-        df = step(df)
-        if verbose:
-            print(f"{step.__name__:<20} {rows_before:>5} -> {len(df):>5} rows")
-    return df.reset_index(drop=True)
+    """Rename the columns, confirm there's nothing to clean, and split the list columns."""
+    df = rename_columns(raw)
+    check_quality(df, verbose=verbose)
+    return split_list_columns(df)
 
 
 def rename_columns(df):
@@ -53,60 +37,62 @@ def rename_columns(df):
     return df.rename(columns=COLUMN_NAMES)
 
 
-def strip_text(df):
-    """Trim stray spaces and treat blank strings as missing."""
-    df = df.copy()
-    for column in TEXT_COLUMNS:
-        text = df[column].str.strip()
-        df[column] = text.where(text != "")
-    return df
+def check_quality(df, verbose=True):
+    """Count common data problems, and stop if any are found.
 
-
-def remove_duplicates(df):
-    """Drop repeated rows, then keep only the first row for each patient ID."""
-    df = df.drop_duplicates()
-    return df.drop_duplicates(subset="patient_id", keep="first")
-
-
-def fix_types(df):
-    """Make age and year numeric and date a real datetime.
-
-    Anything that can't be parsed becomes missing, and remove_invalid_rows
-    drops it. Year is taken from the date when there is one, so the two
-    always agree.
+    This doesn't change the data. It's the evidence that no cleaning step
+    (filling, trimming, or dropping rows) is needed for this dataset.
     """
-    df = df.copy()
-    df["age"] = pd.to_numeric(df["age"], errors="coerce")
-    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    problems = find_quality_problems(df)
+    if verbose:
+        print("Data quality checks:")
+        for name, count in problems.items():
+            print(f"  {name:<36} {count}")
 
-    # Use the date's year when there is a date, otherwise keep the year column's value.
-    year_from_date = df["date"].dt.year
-    year_column = pd.to_numeric(df["year"], errors="coerce")
-    df["year"] = year_from_date.fillna(year_column)
-    return df
+    found = []
+    for name, count in problems.items():
+        if count > 0:
+            found.append(f"{name}: {count}")
+    if found:
+        raise ValueError("The data has problems this pipeline doesn't fix: " + "; ".join(found))
 
 
-def remove_invalid_rows(df):
-    """Drop rows missing a required value or with an impossible age."""
-    df = df.dropna(subset=REQUIRED_COLUMNS)
-    df = df[df["age"].between(MIN_AGE, MAX_AGE)]
-    return df.astype({"age": int, "year": int})
+def find_quality_problems(df):
+    """Return {problem: number of cases} for each check."""
+    extra_spaces = 0
+    for column in TEXT_COLUMNS:
+        text = df[column].dropna()
+        extra_spaces += (text != text.str.strip()).sum()
+
+    # Text that isn't a number becomes NaN here, so it's counted as out of range.
+    ages = pd.to_numeric(df["age"], errors="coerce")
+    bad_ages = ~ages.between(MIN_AGE, MAX_AGE)
+
+    # An unreadable date becomes NaT, which never equals the year, so it's counted too.
+    dates = pd.to_datetime(df["date"], errors="coerce")
+    years = pd.to_numeric(df["year"], errors="coerce")
+    bad_dates = dates.dt.year != years
+
+    return {
+        "missing values": int(df.isna().sum().sum()),
+        "duplicate rows": int(df.duplicated().sum()),
+        "duplicate patient IDs": int(df["patient_id"].duplicated().sum()),
+        "text with extra spaces": int(extra_spaces),
+        f"ages outside {MIN_AGE}-{MAX_AGE}": int(bad_ages.sum()),
+        "dates invalid or not matching year": int(bad_dates.sum()),
+    }
 
 
 def split_list_columns(df):
-    """Turn "Smoking, Diabetes" into a sorted list: ["Diabetes", "Smoking"]."""
+    """Turn "Smoking, Diabetes" into a list: ["Smoking", "Diabetes"]."""
     df = df.copy()
-    df["risk_factors"] = df["risk_factors"].fillna(UNKNOWN_RISK)
     for column in LIST_COLUMNS:
         df[column] = df[column].map(_split_items)
     return df
 
 
 def _split_items(text):
-    """Split "Smoking, Diabetes" into ["Diabetes", "Smoking"], skipping blanks and repeats."""
     items = []
     for item in text.split(","):
-        item = item.strip()
-        if item and item not in items:
-            items.append(item)
-    return sorted(items)
+        items.append(item.strip())
+    return items
